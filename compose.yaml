@@ -1,0 +1,86 @@
+name: mcc-basis
+
+x-app: &app
+  image: ${APP_IMAGE:-mcc-basis:local}
+  build:
+    context: .
+    target: runtime
+  environment:
+    API_KEY: ${API_KEY:?Copy .env.example to .env and set API_KEY}
+    DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-mcc}:${POSTGRES_PASSWORD:-mcc-local-password}@postgres:5432/${POSTGRES_DB:-mcc_basis}
+    RABBITMQ_URL: amqp://${RABBITMQ_USER:-mcc}:${RABBITMQ_PASSWORD:-mcc-local-password}@rabbitmq:5672/
+  init: true
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mcc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mcc-local-password}
+      POSTGRES_DB: ${POSTGRES_DB:-mcc_basis}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-mcc}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-mcc-local-password}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    ports:
+      - "127.0.0.1:${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    restart: unless-stopped
+
+  api:
+    <<: *app
+    command:
+      - /bin/sh
+      - -c
+      - alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os, urllib.request; request = urllib.request.Request('http://127.0.0.1:8000/health', headers={'X-API-Key': os.environ['API_KEY']}); urllib.request.urlopen(request, timeout=3).read()"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+  consumer:
+    <<: *app
+    command: ["python", "-m", "app.worker"]
+    depends_on:
+      api:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    stop_grace_period: 30s
+
+volumes:
+  postgres-data:
+  rabbitmq-data:
